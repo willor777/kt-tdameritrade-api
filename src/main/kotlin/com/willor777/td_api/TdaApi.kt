@@ -1,7 +1,9 @@
 package com.willor777.td_api
 
 import com.willor777.td_api.common.Common
+import com.willor777.td_api.common.Log
 import com.willor777.td_api.common.NetworkClient
+import com.willor777.td_api.common.w
 import com.willor777.td_api.data_objs.*
 import com.willor777.td_api.data_objs.responses.AccessTokenResp
 import com.willor777.td_api.data_objs.responses.OptionQuote
@@ -20,7 +22,6 @@ import java.net.URLDecoder
 
 class TdaApi(
     val credsFilePath: String,
-    val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO)
 ) {
 
     /* Notes
@@ -31,8 +32,11 @@ class TdaApi(
     * - Refresh Tokens (needed to obtain Access Token) expire every 90days, and you will have to re login
     * */
 
+    private val tag: String = TdaApi::class.java.simpleName
     private lateinit var credentials: Credentials
     private val lock = Object()         // Lock for accessing credentials file
+    private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
 
     init {
         initCredentialsFile()
@@ -47,6 +51,7 @@ class TdaApi(
         }
     }
 
+
     private fun saveCredentials(newCreds: Credentials) {
         val credsJson = Common.gson.toJson(newCreds)
 
@@ -56,10 +61,12 @@ class TdaApi(
         }
     }
 
+
     private fun buildLoginUrl(): String {
         return "https://auth.tdameritrade.com/auth?response_type=code&" +
                 "redirect_uri=${credentials.redirectUri}&client_id=${credentials.clientId}%40AMER.OAUTHAP"
     }
+
 
     /** Login to TD Ameritrade to receive refresh token. Token will allow you to obtain access token
      * with TdaApi.getAccessToken() which is needed for authenticated requests.
@@ -112,90 +119,110 @@ class TdaApi(
         saveCredentials(newCreds)
     }
 
+
     // TODO Make Async
-    private suspend fun getAccessToken(): String{
-        // Check access token expiry, If still valid return
-        if (this.credentials.accessTokenExpiry > System.currentTimeMillis()) {
-            return this.credentials.accessToken
+    private fun getAccessToken(): String?{
+
+        try{
+            // Check access token expiry, If still valid return
+            if (this.credentials.accessTokenExpiry > System.currentTimeMillis()) {
+                return this.credentials.accessToken
+            }
+
+            // Check refresh token expiry, If expired throw exception stopping program
+            if (this.credentials.refreshTokenExpiry < System.currentTimeMillis()) {
+                throw Exception("Refresh Token has expired. Please re-acquire with TdaApi().login()")
+            }
+
+            // Use refresh token to update access token
+            val url = Endpoints.AUTH_REFRESH_TOKEN_ENDPOINT.url
+                .toHttpUrl()
+                .newBuilder()
+                .build()
+
+            val formBody = FormBody.Builder()
+                .add("grant_type", "refresh_token")
+                .add("client_id", credentials.clientId)
+                .add("redirect_uri", credentials.redirectUri)
+                .add("refresh_token", credentials.refreshToken)
+
+            val req = Request.Builder()
+                .url(url)
+                .post(formBody.build())
+                .build()
+
+            val resp = NetworkClient.getClient()
+                .newCall(req)
+                .execute()
+
+            if (!resp.isSuccessful){
+                throw Exception("getAccessToken() NETWORK FAILURE! Failed to acquire Access Token!")
+            }
+
+            val body = resp.body?.string()
+            // Parse response
+            val token = Common.gson.fromJson(body, AccessTokenResp::class.java)
+
+            // Update credentials and save
+            val newCreds = credentials.copy(
+                accessToken = token.accessToken,
+                accessTokenExpiry = (token.expiresIn.toLong() * 1000) + System.currentTimeMillis()
+            )
+            saveCredentials(newCreds)
+            return token.accessToken
+
+        }catch (e: Exception){
+            Log.w(tag, "getAccessToken() Failed with Exception: \n${e.message} \n${e.stackTraceToString()}")
+            return null
         }
-
-        // Check refresh token expiry, If expired throw exception stopping program
-        if (this.credentials.refreshTokenExpiry < System.currentTimeMillis()) {
-            throw Exception("Refresh Token has expired. Please re-acquire with TdaApi().login()")
-        }
-
-        // Use refresh token to update access token
-        val url = Endpoints.AUTH_REFRESH_TOKEN_ENDPOINT.url
-            .toHttpUrl()
-            .newBuilder()
-            .build()
-
-        val formBody = FormBody.Builder()
-            .add("grant_type", "refresh_token")
-            .add("client_id", credentials.clientId)
-            .add("redirect_uri", credentials.redirectUri)
-            .add("refresh_token", credentials.refreshToken)
-
-        val req = Request.Builder()
-            .url(url)
-            .post(formBody.build())
-            .build()
-
-        val resp = NetworkClient.getClient()
-            .newCall(req)
-            .execute()
-
-        if (!resp.isSuccessful){
-            throw Exception("getAccessToken() NETWORK FAILURE! Failed to acquire Access Token!")
-        }
-
-        val body = resp.body?.string()
-        // Parse response
-        val token = Common.gson.fromJson(body, AccessTokenResp::class.java)
-
-        // Update credentials and save
-        val newCreds = credentials.copy(
-            accessToken = token.accessToken,
-            accessTokenExpiry = (token.expiresIn.toLong() * 1000) + System.currentTimeMillis()
-        )
-        saveCredentials(newCreds)
-        return token.accessToken
-
     }
+
 
     /** Makes the request and returns the JSON String */
     private suspend fun getQuote(ticker: String): String? {
-        // Simple fun to remove un-needed outer key which is the stock symbol
-        val trimResponse = {r: String -> r.dropLast(1).removePrefix("{\"${ticker}\":") }
+        try {
 
-        val url = Endpoints.QUOTE_ENDPOINT.url.replace("{symbol}", ticker.uppercase())
+            // Simple fun to remove un-needed outer key which is the stock symbol
+            val trimResponse = {r: String -> r.dropLast(1).removePrefix("{\"${ticker}\":") }
 
-        val accessToken = getAccessToken()
+            val url = Endpoints.QUOTE_ENDPOINT.url.replace("{symbol}", ticker.uppercase())
 
-        val deferredResp = this.coroutineScope.async {
-            NetworkClient.getClient().newCall(
-                Request.Builder()
-                    .url(url)
-                    .addHeader("Authorization", "Bearer $accessToken")
-                    .build()
-            ).execute()
+            val accessToken = getAccessToken()
+
+            val deferredResp = this.coroutineScope.async {
+                NetworkClient.getClient().newCall(
+                    Request.Builder()
+                        .url(url)
+                        .addHeader("Authorization", "Bearer $accessToken")
+                        .build()
+                ).execute()
+            }
+
+            val resp = deferredResp.await()
+
+            if (!resp.isSuccessful) {
+                return null
+            }
+            val body = resp.body?.string()
+            return trimResponse(body!!)
+        } catch (e: Exception){
+            Log.w(tag, "getQuote() Failed with Exception: ${e.message} \n${e.stackTraceToString()}")
         }
-
-        val resp = deferredResp.await()
-
-        if (!resp.isSuccessful) {
-            return null
-        }
-        val body = resp.body?.string()
-        return trimResponse(body!!)
+        return null
     }
+
 
     suspend fun getStockQuote(ticker: String): StockQuote?{
+        try {
+            val jsonBody = getQuote(ticker) ?: return null
 
-        val jsonBody = getQuote(ticker) ?: return null
-
-        return Common.gson.fromJson(jsonBody, StockQuote::class.java)
+            return Common.gson.fromJson(jsonBody, StockQuote::class.java)
+        } catch (e: Exception){
+            Log.w(tag, "getStockQuote() Failed with Exception: ${e.message} \n${e.stackTraceToString()}")
+            return null
+        }
     }
+
 
     suspend fun getOptionChain(
         ticker: String,
@@ -210,86 +237,101 @@ class TdaApi(
         toDate: String = "",
         ): OptionChain? {
 
-        // Make async request and await
-        val defResp = this.coroutineScope.async {
-            // Build URL
-            val url = Endpoints.OPTION_CHAIN_ENDPOINT.url.toHttpUrl().newBuilder()
-                .addQueryParameter("symbol", ticker)
-                .addQueryParameter("contractType", optionType.key)
-                .addQueryParameter("strikeCount", nStrikes.toString())
-                .addQueryParameter("includeQuotes", includeQuotes.toString())
-                .addQueryParameter("strategy", optionStrategy.key)
-                .addQueryParameter("interval", spreadStrategyInterval?.toString() ?: "")
-                .addQueryParameter("strike", strikePrice?.toString() ?: "")
-                .addQueryParameter("range", strikeRange.key)
-                .addQueryParameter("fromDate", fromDate)
-                .addQueryParameter("toDate", toDate)
-                .build()
+        try {
 
-            NetworkClient.getClient().newCall(
-                Request.Builder()
-                    .url(url)
-                    .addHeader("Authorization", "Bearer ${getAccessToken()}")
+            // Make async request and await
+            val defResp = this.coroutineScope.async {
+                // Build URL
+                val url = Endpoints.OPTION_CHAIN_ENDPOINT.url.toHttpUrl().newBuilder()
+                    .addQueryParameter("symbol", ticker)
+                    .addQueryParameter("contractType", optionType.key)
+                    .addQueryParameter("strikeCount", nStrikes.toString())
+                    .addQueryParameter("includeQuotes", includeQuotes.toString())
+                    .addQueryParameter("strategy", optionStrategy.key)
+                    .addQueryParameter("interval", spreadStrategyInterval?.toString() ?: "")
+                    .addQueryParameter("strike", strikePrice?.toString() ?: "")
+                    .addQueryParameter("range", strikeRange.key)
+                    .addQueryParameter("fromDate", fromDate)
+                    .addQueryParameter("toDate", toDate)
                     .build()
-            ).execute()
-        }
-        val resp = defResp.await()
-        if (!resp.isSuccessful){
+
+                NetworkClient.getClient().newCall(
+                    Request.Builder()
+                        .url(url)
+                        .addHeader("Authorization", "Bearer ${getAccessToken()}")
+                        .build()
+                ).execute()
+            }
+            val resp = defResp.await()
+            if (!resp.isSuccessful){
+                return null
+            }
+
+            // Convert body to Map
+            val body = resp.body?.string()
+            val map = Common.gson.fromJson(body, Map::class.java)
+
+            // Extract Expiry Dates
+            val calls = map["callExpDateMap"]
+            val puts = map["putExpDateMap"]
+
+            val extractedCalls = mutableListOf<OptionContract>()
+            val extractedPuts = mutableListOf<OptionContract>()
+
+            // Loop through dates to obtain strikes for each date
+            for (expiryDate in (calls as Map<*, *>).keys){
+                val strikeMap = calls[expiryDate] as Map<*, *>
+                val strikes = (calls[expiryDate] as Map<*, *>).keys
+
+                // Loop through strikes, convert each to OptionContract object, add to list
+                for (s in strikes){
+                    val c = (strikeMap[s] as List<*>)[0]
+
+                    // Lazy but saves ALOT of typing. Convert map to json, then json to OptionContract
+                    // TODO Fix this by creating a new OptionContract object, then fill in each value by map lookup
+                    val jsonC = Common.gson.toJson(c)
+                    val contractObj = Common.gson.fromJson(jsonC, OptionContract::class.java)
+                    extractedCalls.add(contractObj)
+                }
+            }
+            // Loop through dates to obtain strikes for each date
+            for (expiryDate in (puts as Map<*, *>).keys){
+                val strikeMap = puts[expiryDate] as Map<*, *>
+                val strikes = (puts[expiryDate] as Map<*, *>).keys
+
+                // Loop through strikes, convert each to OptionContract object, add to list
+                for (s in strikes){
+                    val c = (strikeMap[s] as List<*>)[0]
+
+                    // Lazy but saves ALOT of typing. Convert map to json, then json to OptionContract
+                    // TODO Fix this by creating a new OptionContract object, then fill in each value by map lookup
+                    val jsonC = Common.gson.toJson(c)
+                    val contractObj = Common.gson.fromJson(jsonC, OptionContract::class.java)
+                    extractedPuts.add(contractObj)
+                }
+            }
+
+            return OptionChain(extractedCalls, extractedPuts)
+        } catch (e: Exception){
+            Log.w(tag, "getOptionChain() Failed with Exception: ${e.message} \n${e.stackTraceToString()}")
             return null
         }
 
-        // Convert body to Map
-        val body = resp.body?.string()
-        val map = Common.gson.fromJson(body, Map::class.java)
-
-        // Extract Expiry Dates
-        val calls = map["callExpDateMap"]
-        val puts = map["putExpDateMap"]
-
-        val extractedCalls = mutableListOf<OptionContract>()
-        val extractedPuts = mutableListOf<OptionContract>()
-
-        // Loop through dates to obtain strikes for each date
-        for (expiryDate in (calls as Map<*, *>).keys){
-            val strikeMap = calls[expiryDate] as Map<*, *>
-            val strikes = (calls[expiryDate] as Map<*, *>).keys
-
-            // Loop through strikes, convert each to OptionContract object, add to list
-            for (s in strikes){
-                val c = (strikeMap[s] as List<*>)[0]
-
-                // Lazy but saves ALOT of typing. Convert map to json, then json to OptionContract
-                // TODO Fix this by creating a new OptionContract object, then fill in each value by map lookup
-                val jsonC = Common.gson.toJson(c)
-                val contractObj = Common.gson.fromJson(jsonC, OptionContract::class.java)
-                extractedCalls.add(contractObj)
-            }
-        }
-        // Loop through dates to obtain strikes for each date
-        for (expiryDate in (puts as Map<*, *>).keys){
-            val strikeMap = puts[expiryDate] as Map<*, *>
-            val strikes = (puts[expiryDate] as Map<*, *>).keys
-
-            // Loop through strikes, convert each to OptionContract object, add to list
-            for (s in strikes){
-                val c = (strikeMap[s] as List<*>)[0]
-
-                // Lazy but saves ALOT of typing. Convert map to json, then json to OptionContract
-                // TODO Fix this by creating a new OptionContract object, then fill in each value by map lookup
-                val jsonC = Common.gson.toJson(c)
-                val contractObj = Common.gson.fromJson(jsonC, OptionContract::class.java)
-                extractedPuts.add(contractObj)
-            }
-        }
-
-        return OptionChain(extractedCalls, extractedPuts)
     }
+
 
     suspend fun getOptionQuote(ticker: String): OptionQuote? {
-        val jsonResp = getQuote(ticker) ?: return null
 
-        return Common.gson.fromJson(jsonResp, OptionQuote::class.java)
+        try {
+            val jsonResp = getQuote(ticker) ?: return null
+
+            return Common.gson.fromJson(jsonResp, OptionQuote::class.java)
+        } catch (e: Exception){
+            Log.w(tag, "getOptionQuote() Failed with Exception: ${e.message} \n${e.stackTraceToString()}")
+            return null
+        }
     }
+
 
     /**Retreive Historic Chart Data for given ticker
      * periods: Number of periods to display of periodType, Valid Options as Follows, Defaults marked with *
@@ -322,84 +364,94 @@ class TdaApi(
         startDate: Long? = null,
         prepost: Boolean = false
     ): Chart? {
+        try {
 
-
-        val defData = this.coroutineScope.async {
-            val url = Endpoints.HISTORIC_DATA_ENDPOINT.url.replace("{symbol}", ticker)
-                .toHttpUrl()
-                .newBuilder()
-                .addQueryParameter("periodType", periodType.key)
-                .addQueryParameter("period", periods.toString())
-                .addQueryParameter("frequencyType", freqType.key)
-                .addQueryParameter("frequency", freq.toString())
-                .addQueryParameter("endDate", endDate?.toString() ?: "")
-                .addQueryParameter("startDate", startDate?.toString() ?: "")
-                .addQueryParameter("prepost", prepost.toString())
-                .build()
-
-            NetworkClient.getClient().newCall(
-                Request.Builder()
-                    .url(url)
-                    .addHeader("Authorization", "Bearer ${getAccessToken()}")
+            val defData = this.coroutineScope.async {
+                val url = Endpoints.HISTORIC_DATA_ENDPOINT.url.replace("{symbol}", ticker)
+                    .toHttpUrl()
+                    .newBuilder()
+                    .addQueryParameter("periodType", periodType.key)
+                    .addQueryParameter("period", periods.toString())
+                    .addQueryParameter("frequencyType", freqType.key)
+                    .addQueryParameter("frequency", freq.toString())
+                    .addQueryParameter("endDate", endDate?.toString() ?: "")
+                    .addQueryParameter("startDate", startDate?.toString() ?: "")
+                    .addQueryParameter("prepost", prepost.toString())
                     .build()
-            ).execute()
-        }
 
-        val resp = defData.await()
-        if (!resp.isSuccessful) {
+                NetworkClient.getClient().newCall(
+                    Request.Builder()
+                        .url(url)
+                        .addHeader("Authorization", "Bearer ${getAccessToken()}")
+                        .build()
+                ).execute()
+            }
+
+            val resp = defData.await()
+            if (!resp.isSuccessful) {
+                return null
+            }
+
+            val jsonBody = resp.body?.string() ?: return null
+            return Common.gson.fromJson(jsonBody, Chart::class.java)
+        } catch (e: Exception){
+            Log.w(tag, "getHistoricData() Failed with Exception: ${e.message} \n${e.stackTraceToString()}")
             return null
         }
-
-        val jsonBody = resp.body?.string() ?: return null
-        return Common.gson.fromJson(jsonBody, Chart::class.java)
     }
+
 
     /** Returns map of tickers with the most option trade volume */
     suspend fun getTopVolumeOptions(ticks: List<String>, returnTopN: Int = 5): Map<String, Int>? {
 
-        // Loop through tick list, create async tasks to collect data and calculate volume
-        val volMap = mutableMapOf<String, Int>()
-        val taskList = mutableListOf<Deferred<Unit>>()
-        ticks.forEach { tick ->
+        try {
+            // Loop through tick list, create async tasks to collect data and calculate volume
+            val volMap = mutableMapOf<String, Int>()
+            val taskList = mutableListOf<Deferred<Unit>>()
+            ticks.forEach { tick ->
 
-            // Add async task to list
-            taskList.add(
-                coroutineScope.async(Dispatchers.IO){
+                // Add async task to list
+                taskList.add(
+                    coroutineScope.async(Dispatchers.IO){
 
-                    // Get Chain
-                    val chain = getOptionChain(tick) ?: return@async
+                        // Get Chain
+                        val chain = getOptionChain(tick) ?: return@async
 
-                    // Loop through all calls + puts and add up volume
-                    var volume = 0
-                    chain.calls.forEach { contract ->
-                        volume += contract.totalVolume.toInt()
+                        // Loop through all calls + puts and add up volume
+                        var volume = 0
+                        chain.calls.forEach { contract ->
+                            volume += contract.totalVolume.toInt()
+                        }
+                        chain.puts.forEach { contract ->
+                            volume += contract.totalVolume.toInt()
+                        }
+
+                        // Add volume data to map
+                        volMap[tick] = volume
                     }
-                    chain.puts.forEach { contract ->
-                        volume += contract.totalVolume.toInt()
-                    }
-
-                    // Add volume data to map
-                    volMap[tick] = volume
-                }
-            )
-        }
-
-        // Await all tasks
-        taskList.awaitAll()
-
-        // Sort map
-        val sortedMap = volMap.entries.sortedBy { it.value }.reversed()
-
-        // Build final map containing top volume tickers
-        val finalMap = mutableMapOf<String, Int>()
-        for (entry in sortedMap) {
-            if (finalMap.size == returnTopN){
-                break
+                )
             }
-            finalMap[entry.key] = entry.value
-        }
 
-        return finalMap
+            // Await all tasks
+            taskList.awaitAll()
+
+            // Sort map
+            val sortedMap = volMap.entries.sortedBy { it.value }.reversed()
+
+            // Build final map containing top volume tickers
+            val finalMap = mutableMapOf<String, Int>()
+            for (entry in sortedMap) {
+                if (finalMap.size == returnTopN){
+                    break
+                }
+                finalMap[entry.key] = entry.value
+            }
+
+            return finalMap
+        } catch (e: Exception){
+            Log.w(tag, "getTopVolumeOptions() Failed with Exception: ${e.message} \n${e.stackTraceToString()}")
+            return null
+        }
     }
 
 }
