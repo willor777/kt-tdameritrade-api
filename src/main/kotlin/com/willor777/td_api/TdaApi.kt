@@ -10,9 +10,7 @@ import com.willor777.td_api.data_objs.responses.StockQuote
 import com.willor777.td_api.data_objs.responses.historicresp.Chart
 import com.willor777.td_api.data_objs.responses.optionchainresp.OptionChain
 import com.willor777.td_api.data_objs.responses.optionchainresp.OptionContract
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
+import kotlinx.coroutines.*
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
@@ -354,6 +352,54 @@ class TdaApi(
 
         val jsonBody = resp.body?.string() ?: return null
         return Common.gson.fromJson(jsonBody, Chart::class.java)
+    }
+
+    /** Returns map of tickers with the most option trade volume */
+    suspend fun getTopVolumeOptions(ticks: List<String>, returnTopN: Int = 5): Map<String, Int>? {
+
+        // Loop through tick list, create async tasks to collect data and calculate volume
+        val volMap = mutableMapOf<String, Int>()
+        val taskList = mutableListOf<Deferred<Unit>>()
+        ticks.forEach { tick ->
+
+            // Add async task to list
+            taskList.add(
+                coroutineScope.async(Dispatchers.IO){
+
+                    // Get Chain
+                    val chain = getOptionChain(tick) ?: return@async
+
+                    // Loop through all calls + puts and add up volume
+                    var volume = 0
+                    chain.calls.forEach { contract ->
+                        volume += contract.totalVolume.toInt()
+                    }
+                    chain.puts.forEach { contract ->
+                        volume += contract.totalVolume.toInt()
+                    }
+
+                    // Add volume data to map
+                    volMap[tick] = volume
+                }
+            )
+        }
+
+        // Await all tasks
+        taskList.awaitAll()
+
+        // Sort map
+        val sortedMap = volMap.entries.sortedBy { it.value }.reversed()
+
+        // Build final map containing top volume tickers
+        val finalMap = mutableMapOf<String, Int>()
+        for (entry in sortedMap) {
+            if (finalMap.size == returnTopN){
+                break
+            }
+            finalMap[entry.key] = entry.value
+        }
+
+        return finalMap
     }
 
 }
