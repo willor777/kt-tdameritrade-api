@@ -3,10 +3,6 @@ plugins {
     id 'java-library'
     id 'maven-publish'
 }
-//
-//group = 'org.example'
-//version = '1.0-SNAPSHOT'
-
 
 dependencies {
     testImplementation 'org.jetbrains.kotlin:kotlin-test'
@@ -27,13 +23,12 @@ compileTestKotlin {
     kotlinOptions.jvmTarget = '1.8'
 }
 
-
 publishing {
     publications {
         maven(MavenPublication) {
             groupId 'com.github.willor777'
             artifactId 'kt-tdameritrade-api'
-            version "1.0.0-alpha"
+            version "1.0.2-alpha"
             from components.java
         }
     }
