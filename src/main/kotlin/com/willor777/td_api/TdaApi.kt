@@ -21,7 +21,7 @@ import java.net.URLDecoder
 
 
 class TdaApi(
-    val credsFilePath: String,
+    private val credsFilePath: String,
 ) {
 
     /* Notes
@@ -36,7 +36,7 @@ class TdaApi(
     private lateinit var credentials: Credentials
     private val lock = Object()         // Lock for accessing credentials file
     private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-
+    private val accessTokenRetryLimit = 20
 
     init {
         initCredentialsFile()
@@ -55,7 +55,7 @@ class TdaApi(
     private fun saveCredentials(newCreds: Credentials) {
         val credsJson = Common.gson.toJson(newCreds)
 
-        // Locking might not be neccessary but doing it anyway
+        // Locking might not be necessary but doing it anyway
         synchronized(lock){
             File(credsFilePath).writeText(credsJson)
         }
@@ -80,7 +80,7 @@ class TdaApi(
         val loginCodeResponse = readLine()!!.trim()
 
         // parse returned url for code
-        val encodedString = loginCodeResponse?.substringAfterLast("?code=")!!
+        val encodedString = loginCodeResponse.substringAfterLast("?code=")
         val code = URLDecoder.decode(encodedString, "UTF-8")
 
         // use code make request to auth endpoint for access token
@@ -119,62 +119,80 @@ class TdaApi(
         saveCredentials(newCreds)
     }
 
-
-    // TODO Make Async
-    private fun getAccessToken(): String?{
+    /** Makes the API request for Access Token needed for real-time data */
+    private suspend fun fetchAccessToken(): String?{
 
         try{
-            // Check access token expiry, If still valid return
-            if (this.credentials.accessTokenExpiry > System.currentTimeMillis()) {
-                return this.credentials.accessToken
+            val asyncTask = coroutineScope.async(Dispatchers.IO){
+                // Check access token expiry, If still valid return
+                if (credentials.accessTokenExpiry > System.currentTimeMillis()) {
+                    return@async credentials.accessToken
+                }
+
+                // Check refresh token expiry, If expired throw exception stopping program
+                if (credentials.refreshTokenExpiry < System.currentTimeMillis()) {
+                    throw Exception("Refresh Token has expired. Please re-acquire with TdaApi().login()")
+                }
+
+                // Use refresh token to update access token
+                val url = Endpoints.AUTH_REFRESH_TOKEN_ENDPOINT.url
+                    .toHttpUrl()
+                    .newBuilder()
+                    .build()
+
+                val formBody = FormBody.Builder()
+                    .add("grant_type", "refresh_token")
+                    .add("client_id", credentials.clientId)
+                    .add("redirect_uri", credentials.redirectUri)
+                    .add("refresh_token", credentials.refreshToken)
+
+                val req = Request.Builder()
+                    .url(url)
+                    .post(formBody.build())
+                    .build()
+
+                val resp = NetworkClient.getClient()
+                    .newCall(req)
+                    .execute()
+
+                if (!resp.isSuccessful){
+                    throw Exception("getAccessToken() NETWORK FAILURE! Failed to acquire Access Token!")
+                }
+
+                val body = resp.body?.string()
+                // Parse response
+                val token = Common.gson.fromJson(body, AccessTokenResp::class.java)
+
+                // Update credentials and save
+                val newCreds = credentials.copy(
+                    accessToken = token.accessToken,
+                    accessTokenExpiry = (token.expiresIn.toLong() * 1000) + System.currentTimeMillis()
+                )
+                saveCredentials(newCreds)
+                return@async token.accessToken
             }
-
-            // Check refresh token expiry, If expired throw exception stopping program
-            if (this.credentials.refreshTokenExpiry < System.currentTimeMillis()) {
-                throw Exception("Refresh Token has expired. Please re-acquire with TdaApi().login()")
-            }
-
-            // Use refresh token to update access token
-            val url = Endpoints.AUTH_REFRESH_TOKEN_ENDPOINT.url
-                .toHttpUrl()
-                .newBuilder()
-                .build()
-
-            val formBody = FormBody.Builder()
-                .add("grant_type", "refresh_token")
-                .add("client_id", credentials.clientId)
-                .add("redirect_uri", credentials.redirectUri)
-                .add("refresh_token", credentials.refreshToken)
-
-            val req = Request.Builder()
-                .url(url)
-                .post(formBody.build())
-                .build()
-
-            val resp = NetworkClient.getClient()
-                .newCall(req)
-                .execute()
-
-            if (!resp.isSuccessful){
-                throw Exception("getAccessToken() NETWORK FAILURE! Failed to acquire Access Token!")
-            }
-
-            val body = resp.body?.string()
-            // Parse response
-            val token = Common.gson.fromJson(body, AccessTokenResp::class.java)
-
-            // Update credentials and save
-            val newCreds = credentials.copy(
-                accessToken = token.accessToken,
-                accessTokenExpiry = (token.expiresIn.toLong() * 1000) + System.currentTimeMillis()
-            )
-            saveCredentials(newCreds)
-            return token.accessToken
-
+            return asyncTask.await()
         }catch (e: Exception){
             Log.w(tag, "getAccessToken() Failed with Exception: \n${e.message} \n${e.stackTraceToString()}")
             return null
         }
+    }
+
+    /** Calls 'fetchAccessToken()' repeatedly until successful response is received OR max retry attempts is reached */
+    private suspend fun getAccessToken(): String {
+        var attempts = 0
+        while (attempts < accessTokenRetryLimit){
+            val tokenAttempt = fetchAccessToken()
+            if (tokenAttempt != null){
+                return tokenAttempt
+            }
+            Log.w(tag,
+                "getAccessToken() Received 'null' response. Will Retry. Current number of attempts: $attempts"
+            )
+
+            attempts += 1
+        }
+        throw Exception("$tag.getAccessToken() Has reached maximum retry attempts of $attempts attempts! Crashing Program Now!!!!!! MuWhaHahahahahahaaaa!")
     }
 
 
@@ -333,7 +351,7 @@ class TdaApi(
     }
 
 
-    /**Retreive Historic Chart Data for given ticker
+    /**Retrieve Historic Chart Data for given ticker
      * periods: Number of periods to display of periodType, Valid Options as Follows, Defaults marked with *
      * day: 1, 2, 3, 4, 5, 10*
      * month: 1*, 2, 3, 6
@@ -415,7 +433,11 @@ class TdaApi(
                     coroutineScope.async(Dispatchers.IO){
 
                         // Get Chain
-                        val chain = getOptionChain(tick) ?: return@async
+                        val chain = getOptionChain(tick)
+                        if (chain == null){
+                            Log.w(tag, "getTopVolumeOptions() Failed to acquire OptionChain for $tick")
+                            return@async
+                        }
 
                         // Loop through all calls + puts and add up volume
                         var volume = 0
@@ -453,7 +475,6 @@ class TdaApi(
             return null
         }
     }
-
 }
 
 
