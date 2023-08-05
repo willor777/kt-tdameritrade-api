@@ -27,8 +27,8 @@ publishing {
     publications {
         maven(MavenPublication) {
             groupId 'com.github.willor777'
-            artifactId 'TdaApi'
-            version "1.1-alpha"
+            artifactId 'kt-tdameritrade-api'
+            version "1.2-alpha"
             from components.java
         }
     }

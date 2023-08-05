@@ -261,6 +261,7 @@ class TdaApi(
                     .addQueryParameter("symbol", ticker)
                     .addQueryParameter("contractType", optionType.key)
                     .addQueryParameter("strategy", optionStrategy.key)
+                    .addQueryParameter("strikeCount", "-1")         // Added this cuz it's simpler
                     .addQueryParameter("interval", spreadStrategyInterval?.toString() ?: "")
                     .addQueryParameter("range", strikeRange.key)
                     .addQueryParameter("fromDate", fromDate)

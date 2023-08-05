@@ -3,4 +3,4 @@
 /build/
 /build/classes/kotlin/main/
 src/main/kotlin/com/willor777/td_api/cred_path.kt
-src/main/kotlin/tests_basic.kt
+src/main/kotlin/com/willor777/td_api/scratch.kt
