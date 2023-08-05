@@ -249,7 +249,7 @@ class TdaApi(
         includeQuotes: Boolean = false,
         optionStrategy: OptionStrategy = OptionStrategy.SINGLE,
         spreadStrategyInterval: Int? = null,
-        strikePrice: Int? = null,
+        strikePrice: Double? = null,
         strikeRange: StrikeRange = StrikeRange.ALL,
         fromDate: String = "",
         toDate: String = "",
