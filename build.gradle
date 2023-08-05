@@ -28,7 +28,7 @@ publishing {
         maven(MavenPublication) {
             groupId 'com.github.willor777'
             artifactId 'kt-tdameritrade-api'
-            version "1.0.3-alpha"
+            version "1.0.4-alpha"
             from components.java
         }
     }

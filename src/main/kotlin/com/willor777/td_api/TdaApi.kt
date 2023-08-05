@@ -245,11 +245,8 @@ class TdaApi(
     suspend fun getOptionChain(
         ticker: String,
         optionType: OptionType = OptionType.ALL,
-        nStrikes: Int = 10,
-        includeQuotes: Boolean = false,
         optionStrategy: OptionStrategy = OptionStrategy.SINGLE,
         spreadStrategyInterval: Int? = null,
-        strikePrice: Double? = null,
         strikeRange: StrikeRange = StrikeRange.ALL,
         fromDate: String = "",
         toDate: String = "",
@@ -263,11 +260,8 @@ class TdaApi(
                 val url = Endpoints.OPTION_CHAIN_ENDPOINT.url.toHttpUrl().newBuilder()
                     .addQueryParameter("symbol", ticker)
                     .addQueryParameter("contractType", optionType.key)
-                    .addQueryParameter("strikeCount", nStrikes.toString())
-                    .addQueryParameter("includeQuotes", includeQuotes.toString())
                     .addQueryParameter("strategy", optionStrategy.key)
                     .addQueryParameter("interval", spreadStrategyInterval?.toString() ?: "")
-                    .addQueryParameter("strike", strikePrice?.toString() ?: "")
                     .addQueryParameter("range", strikeRange.key)
                     .addQueryParameter("fromDate", fromDate)
                     .addQueryParameter("toDate", toDate)
