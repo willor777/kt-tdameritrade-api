@@ -21,7 +21,8 @@ import java.net.URLDecoder
 
 
 class TdaApi(
-    private val credsFilePath: String,
+    private val credsFilePath: String?,
+    private val credsJson: String?
 ) {
 
     /* Notes
@@ -43,20 +44,38 @@ class TdaApi(
     }
 
     private fun initCredentialsFile() {
-        // Using lock just in case multiple instances of this class have been initialized
-        synchronized(lock) {
+
+        if (credsFilePath != null){
             // load json creds file, update vals
             val creds = File(this.credsFilePath).readText()
             credentials = Common.gson.fromJson(creds, Credentials::class.java)
         }
+        else if (credsJson != null) {
+            credentials = Common.gson.fromJson(credsJson, Credentials::class.java)
+        }
+        else {
+            throw NullPointerException("TdaApi() Constructor Requires either credsFilePath or credsJson to not " +
+                    "be null. Both are currently null")
+        }
+
+
     }
+
+//    private fun initCredentialsFile() {
+//        // Using lock just in case multiple instances of this class have been initialized
+//        synchronized(lock) {
+//            // load json creds file, update vals
+//            val creds = File(this.credsFilePath).readText()
+//            credentials = Common.gson.fromJson(creds, Credentials::class.java)
+//        }
+//    }
 
 
     private fun saveCredentials(newCreds: Credentials) {
         val credsJson = Common.gson.toJson(newCreds)
 
         // Locking might not be necessary but doing it anyway
-        synchronized(lock){
+        synchronized(lock) {
             File(credsFilePath).writeText(credsJson)
         }
     }
@@ -100,7 +119,7 @@ class TdaApi(
             .url(url)
             .post(formBody.build())
             .build()
-        
+
         val resp = NetworkClient.getClient()
             .newCall(req)
             .execute()
@@ -120,10 +139,10 @@ class TdaApi(
     }
 
     /** Makes the API request for Access Token needed for real-time data */
-    private suspend fun fetchAccessToken(): String?{
+    private suspend fun fetchAccessToken(): String? {
 
-        try{
-            val asyncTask = coroutineScope.async(Dispatchers.IO){
+        try {
+            val asyncTask = coroutineScope.async(Dispatchers.IO) {
                 // Check access token expiry, If still valid return
                 if (credentials.accessTokenExpiry > System.currentTimeMillis()) {
                     return@async credentials.accessToken
@@ -155,7 +174,7 @@ class TdaApi(
                     .newCall(req)
                     .execute()
 
-                if (!resp.isSuccessful){
+                if (!resp.isSuccessful) {
                     throw Exception("getAccessToken() NETWORK FAILURE! Failed to acquire Access Token!")
                 }
 
@@ -172,7 +191,7 @@ class TdaApi(
                 return@async token.accessToken
             }
             return asyncTask.await()
-        }catch (e: Exception){
+        } catch (e: Exception) {
             Log.w(tag, "getAccessToken() Failed with Exception: \n${e.message} \n${e.stackTraceToString()}")
             return null
         }
@@ -181,12 +200,13 @@ class TdaApi(
     /** Calls 'fetchAccessToken()' repeatedly until successful response is received OR max retry attempts is reached */
     private suspend fun getAccessToken(): String {
         var attempts = 0
-        while (attempts < accessTokenRetryLimit){
+        while (attempts < accessTokenRetryLimit) {
             val tokenAttempt = fetchAccessToken()
-            if (tokenAttempt != null){
+            if (tokenAttempt != null) {
                 return tokenAttempt
             }
-            Log.w(tag,
+            Log.w(
+                tag,
                 "getAccessToken() Received 'null' response. Will Retry. Current number of attempts: $attempts"
             )
 
@@ -201,7 +221,7 @@ class TdaApi(
         try {
 
             // Simple fun to remove un-needed outer key which is the stock symbol
-            val trimResponse = {r: String -> r.dropLast(1).removePrefix("{\"${ticker}\":") }
+            val trimResponse = { r: String -> r.dropLast(1).removePrefix("{\"${ticker}\":") }
 
             val url = Endpoints.QUOTE_ENDPOINT.url.replace("{symbol}", ticker.uppercase())
 
@@ -223,19 +243,19 @@ class TdaApi(
             }
             val body = resp.body?.string()
             return trimResponse(body!!)
-        } catch (e: Exception){
+        } catch (e: Exception) {
             Log.w(tag, "getQuote() Failed with Exception: ${e.message} \n${e.stackTraceToString()}")
         }
         return null
     }
 
 
-    suspend fun getStockQuote(ticker: String): StockQuote?{
+    suspend fun getStockQuote(ticker: String): StockQuote? {
         try {
             val jsonBody = getQuote(ticker) ?: return null
 
             return Common.gson.fromJson(jsonBody, StockQuote::class.java)
-        } catch (e: Exception){
+        } catch (e: Exception) {
             Log.w(tag, "getStockQuote() Failed with Exception: ${e.message} \n${e.stackTraceToString()}")
             return null
         }
@@ -250,7 +270,7 @@ class TdaApi(
         strikeRange: StrikeRange = StrikeRange.ALL,
         fromDate: String = "",
         toDate: String = "",
-        ): OptionChain? {
+    ): OptionChain? {
 
         try {
 
@@ -276,7 +296,7 @@ class TdaApi(
                 ).execute()
             }
             val resp = defResp.await()
-            if (!resp.isSuccessful){
+            if (!resp.isSuccessful) {
                 return null
             }
 
@@ -292,12 +312,12 @@ class TdaApi(
             val extractedPuts = mutableListOf<OptionContract>()
 
             // Loop through dates to obtain strikes for each date
-            for (expiryDate in (calls as Map<*, *>).keys){
+            for (expiryDate in (calls as Map<*, *>).keys) {
                 val strikeMap = calls[expiryDate] as Map<*, *>
                 val strikes = (calls[expiryDate] as Map<*, *>).keys
 
                 // Loop through strikes, convert each to OptionContract object, add to list
-                for (s in strikes){
+                for (s in strikes) {
                     val c = (strikeMap[s] as List<*>)[0]
 
                     // Lazy but saves ALOT of typing. Convert map to json, then json to OptionContract
@@ -308,12 +328,12 @@ class TdaApi(
                 }
             }
             // Loop through dates to obtain strikes for each date
-            for (expiryDate in (puts as Map<*, *>).keys){
+            for (expiryDate in (puts as Map<*, *>).keys) {
                 val strikeMap = puts[expiryDate] as Map<*, *>
                 val strikes = (puts[expiryDate] as Map<*, *>).keys
 
                 // Loop through strikes, convert each to OptionContract object, add to list
-                for (s in strikes){
+                for (s in strikes) {
                     val c = (strikeMap[s] as List<*>)[0]
 
                     // Lazy but saves ALOT of typing. Convert map to json, then json to OptionContract
@@ -325,7 +345,7 @@ class TdaApi(
             }
 
             return OptionChain(extractedCalls, extractedPuts)
-        } catch (e: Exception){
+        } catch (e: Exception) {
             Log.w(tag, "getOptionChain() Failed with Exception: ${e.message} \n${e.stackTraceToString()}")
             return null
         }
@@ -339,7 +359,7 @@ class TdaApi(
             val jsonResp = getQuote(ticker) ?: return null
 
             return Common.gson.fromJson(jsonResp, OptionQuote::class.java)
-        } catch (e: Exception){
+        } catch (e: Exception) {
             Log.w(tag, "getOptionQuote() Failed with Exception: ${e.message} \n${e.stackTraceToString()}")
             return null
         }
@@ -407,7 +427,7 @@ class TdaApi(
 
             val jsonBody = resp.body?.string() ?: return null
             return Common.gson.fromJson(jsonBody, Chart::class.java)
-        } catch (e: Exception){
+        } catch (e: Exception) {
             Log.w(tag, "getHistoricData() Failed with Exception: ${e.message} \n${e.stackTraceToString()}")
             return null
         }
@@ -425,11 +445,11 @@ class TdaApi(
 
                 // Add async task to list
                 taskList.add(
-                    coroutineScope.async(Dispatchers.IO){
+                    coroutineScope.async(Dispatchers.IO) {
 
                         // Get Chain
                         val chain = getOptionChain(tick)
-                        if (chain == null){
+                        if (chain == null) {
                             Log.w(tag, "getTopVolumeOptions() Failed to acquire OptionChain for $tick")
                             return@async
                         }
@@ -458,14 +478,14 @@ class TdaApi(
             // Build final map containing top volume tickers
             val finalMap = mutableMapOf<String, Int>()
             for (entry in sortedMap) {
-                if (finalMap.size == returnTopN){
+                if (finalMap.size == returnTopN) {
                     break
                 }
                 finalMap[entry.key] = entry.value
             }
 
             return finalMap
-        } catch (e: Exception){
+        } catch (e: Exception) {
             Log.w(tag, "getTopVolumeOptions() Failed with Exception: ${e.message} \n${e.stackTraceToString()}")
             return null
         }
